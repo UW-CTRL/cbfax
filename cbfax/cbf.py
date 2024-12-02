@@ -1,9 +1,5 @@
 import jax
-import jax.numpy as jnp
 import functools
-from cbfax.dynamics import ControlAffineDynamics, Dynamics, linearize
-
-
 
 @functools.partial(jax.jit, static_argnames=("scalar_func"))
 def lie_derivative(state, scalar_func, tangent):
