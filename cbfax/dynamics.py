@@ -2,9 +2,10 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import functools
+import abc
 from typing import Callable
 
-def runge_kutta_integrator(dynamics, dt=0.01):
+def runge_kutta_integrator(dynamics, dt=0.1):
     # zero-order hold
     def integrator(x, u, t):
         dt2 = dt / 2.0
@@ -21,23 +22,40 @@ def linearize(dynamics, state, control, t):
     C = dynamics(state, control, t) - A @ state - B @ control
     return A, B, C
 
-class Dynamics(eqx.Module):
+class Dynamics(metaclass=abc.ABCMeta):
     state_dim: int
     control_dim: int
 
-    def ode_dynamics(self, state, control, t):
-        pass  # implement later
+    @abc.abstractmethod
+    def ode_dynamics(self, state, control, time=0):
+        """Implements the continuous-time dynamics ODE."""
 
-    def discrete_step(self, state, control, t, dt):
-        return runge_kutta_integrator(self.ode_dynamics, dt)(state, control, t)
+    def discrete_step(self, state, control, time=0, dt=0.1):
+        return runge_kutta_integrator(self.ode_dynamics, dt)(state, control, time)
+
+    def __call__(self, state, control, time=0):
+        return self.ode_dynamics(state, control, time)
+
 
 
 class ControlAffineDynamics(Dynamics):
-    drift_term: Callable
-    control_jacobian: Callable
 
-    def ode_dynamics(self, state, control, t):
-        return self.drift_term(state, t) + self.control_jacobian(state, t) @ control
+    def ode_dynamics(self, state, control, time=0):
+        return self.open_loop_dynamics(state, time) + self.control_jacobian(state, time) @ control
+
+    @abc.abstractmethod
+    def open_loop_dynamics(self, state, time):
+        """Implements the open loop dynamics `f(x, t)`."""
+
+    @abc.abstractmethod
+    def control_jacobian(self, state, time):
+        """Implements the control Jacobian `G_u(x, t)`."""
+
+
+# class NAgentIntegrator(ControlAffineDynamics):
+#     integrator_dim: int
+#     N_dim: int
+#     n_agents: int
 
 
 class IntegratorND(ControlAffineDynamics):
@@ -50,11 +68,15 @@ class IntegratorND(ControlAffineDynamics):
         self.state_dim = self.integrator_dim * self.N_dim
         self.control_dim = self.N_dim
 
-        A = jnp.eye(self.state_dim, k=self.N_dim)
-        B = jnp.zeros([self.state_dim, self.control_dim])
-        B = B.at[-self.N_dim:].set(jnp.eye(self.N_dim))
-        self.drift_term = lambda x,t: A @ x
-        self.control_jacobian = lambda x,t: B
+        self.A = jnp.eye(self.state_dim, k=self.N_dim)
+        self.B = jnp.zeros([self.state_dim, self.control_dim])
+        self.B = self.B.at[-self.N_dim:].set(jnp.eye(self.N_dim))
+
+    def open_loop_dynamics(self, state, time=0):
+        return self.A @ state
+
+    def control_jacobian(self, state, time=0):
+        return self.B
         
     # def ode_dynamics(self, state, control, t):
     #     return jnp.concatenate([state[self.N_dim:], control])
@@ -71,53 +93,92 @@ def SingleIntegrator2D():
 def SingleIntegrator1D():
     return IntegratorND(1, 1) 
 
-class Unicycle(Dynamics):
+class Unicycle(ControlAffineDynamics):
     state_dim: int = 3
     control_dim: int = 2
 
-    def ode_dynamics(self, state, control, t):
-        x, y, th = state
-        v, om = control
-        return jnp.array([v * jnp.cos(th),
-                          v * jnp.sin(th),
-                          om])
+    def open_loop_dynamics(self, state, time=0):
+        return jnp.zeros(self.state_dim)
     
-class DynamicallyExtendedUnicycle(Dynamics):
+    def control_jacobian(self, state, time=0):
+        # v, om = control
+        x, y, th = state
+        return jnp.array(
+            [
+                [jnp.cos(th), 0.],
+                [jnp.sin(th), 0.],
+                [0., 1.]
+            ]
+        )
+
+class DynamicallyExtendedUnicycle(ControlAffineDynamics):
     state_dim: int = 4
     control_dim: int = 2
 
-    def ode_dynamics(self, state, control, t):
-        x, y, th, v = state
-        a, om = control
-        return jnp.array([v * jnp.cos(th),
-                          v * jnp.sin(th),
-                          om,
-                          a])
-    
-class SimpleCar(Dynamics):
-    state_dim: int = 3
-    control_dim: int = 2
-    length: int = 1.
+    # def ode_dynamics(self, state, control, time=0):
+    #     x, y, th, v = state
+    #     a, om = control
+    #     return jnp.array([v * jnp.cos(th),
+    #                       v * jnp.sin(th),
+    #                       om,
+    #                       a])
 
-    def ode_dynamics(self, state, control, t):
-        x, y, th = state
-        v, delta = control
-        return jnp.array([v * jnp.cos(th),
-                          v * jnp.sin(th),
-                          v / self.length * jnp.tan(delta)])
+
+    def open_loop_dynamics(self, state, time=0):
+        x, y, th, v = state
+        # om, a = control
+        return jnp.array(
+            [
+                v * jnp.cos(th),
+                v * jnp.sin(th),
+                0.,
+                0.,
+            ]
+        )
     
-class DynamicallyExtendedSimpleCar(Dynamics):
+    def control_jacobian(self, state, time=0):
+        # om, a = control
+        return jnp.array(
+            [
+                [0., 0.],
+                [0., 0.],
+                [1., 0.],
+                [0., 1.]
+            ]
+        )
+
+
+class SimpleCar(ControlAffineDynamics):
     state_dim: int = 4
     control_dim: int = 2
-    length: int = 1.
+    wheelbase: int
 
-    def ode_dynamics(self, state, control, t):
+    def __init__(self, wheelbase):
+        self.wheelbase = wheelbase
+
+    def open_loop_dynamics(self, state, time=0):
         x, y, th, v = state
-        a, delta = control
-        return jnp.array([v * jnp.cos(th),
-                          v * jnp.sin(th),
-                          v / self.length * jnp.tan(delta),
-                          a])
+        # tandelta, a = control
+        return jnp.array(
+            [
+                v * jnp.cos(th),
+                v * jnp.sin(th),
+                0.,
+                0.,
+            ]
+        )
+    
+    def control_jacobian(self, state, time=0):
+        # tandelta, a = control, tandelta = tan(delta)
+        x, y, th, v = state
+        return jnp.array(
+            [
+                [0., 0.],
+                [0., 0.],
+                [v / self.wheelbase, 0.],
+                [0., 1.]
+            ]
+        )
     
 
 class TwoPlayerRelativeIntegratorND(ControlAffineDynamics):
@@ -130,34 +191,83 @@ class TwoPlayerRelativeIntegratorND(ControlAffineDynamics):
         self.state_dim = self.integrator_dim * self.N_dim
         self.control_dim = self.N_dim * 2
 
-        A = jnp.eye(self.state_dim, k=self.N_dim)
+        self.A = jnp.eye(self.state_dim, k=self.N_dim)
         B = jnp.zeros([self.state_dim, self.N_dim])
         B = B.at[-self.N_dim:].set(jnp.eye(self.N_dim))
-        B2 = jnp.concatenate([-B, B], axis=-1)
-        self.drift_term = lambda x,t: A @ x
-        self.control_jacobian = lambda x,t: B2
+        self.B2 = jnp.concatenate([-B, B], axis=-1)
 
 
-class RelativeUnicycle(Dynamics):
+    def open_loop_dynamics(self, state, time=0):
+        return self.A @ state
+
+    def control_jacobian(self, state, time=0):
+        return self.B2
+
+
+class RelativeUnicycle(ControlAffineDynamics):
     state_dim: int = 3
     control_dim: int = 4
 
-    def ode_dynamics(self, state, control, t):
-        xrel, yrel, threl = state
-        v1, om1, v2, om2 = control
-        return jnp.array([v2 * jnp.cos(threl) + om1 * yrel - v1,
-                          v2 * jnp.sin(threl) - om1 * xrel,
-                          om2 - om1])
+    # def ode_dynamics(self, state, control, time=0):
+    #     xrel, yrel, threl = state
+    #     v1, om1, v2, om2 = control
+    #     return jnp.array([v2 * jnp.cos(threl) + om1 * yrel - v1,
+    #                       v2 * jnp.sin(threl) - om1 * xrel,
+    #                       om2 - om1])
 
-class RelativeDynamicallyExtendedUnicycle(Dynamics):
+
+    def open_loop_dynamics(self, state, time=0):
+        xrel, yrel, threl = state
+        # v1, om1, v2, om2 = control
+        return jnp.zeros(self.state_dim)
+
+    def control_jacobian(self, state, time=0):
+        xrel, yrel, threl = state
+        # v1, om1, v2, om2 = control
+        return jnp.array(
+            [
+                [-1., yrel, jnp.cos(threl), 0.],
+                [0., -xrel, jnp.sin(threl), 0.],
+                [0., -1., 0., 1.]
+            ]
+        )
+
+
+class RelativeDynamicallyExtendedUnicycle(ControlAffineDynamics):
     state_dim: int = 5
     control_dim: int = 4
 
-    def ode_dynamics(self, state, control, t):
+    # def ode_dynamics(self, state, control, time=0):
+    #     xrel, yrel, threl, v1, v2 = state
+    #     om1, a1, om2, a2 = control
+    #     return jnp.array([v2 * jnp.cos(threl) + om1 * yrel - v1,
+    #                       v2 * jnp.sin(threl) - om1 * xrel,
+    #                       om2 - om1,
+    #                       a1,
+    #                       a2])
+
+    def open_loop_dynamics(self, state, time=0):
         xrel, yrel, threl, v1, v2 = state
-        a1, om1, a2, om2 = control
-        return jnp.array([v2 * jnp.cos(threl) + om1 * yrel - v1,
-                          v2 * jnp.sin(threl) - om1 * xrel,
-                          om2 - om1,
-                          a1,
-                          a2])
+        # om1, a1, om2, a1 = control
+        return jnp.array(
+            [
+                -v1 + v2 * jnp.cos(threl),
+                v2 * jnp.sin(threl),
+                0.,
+                0.,
+                0.
+            ]
+        )
+
+    def control_jacobian(self, state, time=0):
+        xrel, yrel, threl, v1, v2 = state
+        # om1, a1, om2, a1 = control
+        return jnp.array(
+            [
+                [yrel, 0., 0., 0.],
+                [xrel, 0., 0., 0.],
+                [-1., 0., 1., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., 0., 1.]
+            ]
+        )

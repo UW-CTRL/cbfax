@@ -3,57 +3,49 @@ import jax.numpy as jnp
 import functools
 from cbfax.dynamics import ControlAffineDynamics, Dynamics, linearize
 
-def lie_derivative(directional_func, scalar_func):
-    '''
-     ∇b(x)ᵀf(x,t)  b: scalar_func, f: directional_func
-    '''
-    return lambda state: jax.jacobian(scalar_func)(state) @ directional_func(state)
 
-def lie_derivative_n(order, directional_func, scalar_func):
+
+@functools.partial(jax.jit, static_argnames=("scalar_func"))
+def lie_derivative(state, scalar_func, tangent):
     '''
-     Lⁿfb  b: scalar_func, f: directional_func. Applying it n times.
+     Evaluates  ∇b(x)ᵀv  b: scalar_func, v: tangent
     '''
+    return jax.jvp(scalar_func, (state,), (tangent,))[1]
+
+def lie_derivative_func(scalar_func, directional_func):
+    '''
+     Computes the function f(x) = ∇b(x)ᵀv(x)  b: scalar_func, v: directional_func
+     This is used in computing higher order CBFs
+    '''
+    return lambda state: jax.jvp(scalar_func, (state,), (directional_func(state),))[1]
+
+def lie_derivative_func_n(order, scalar_func, directional_func):
     sf = scalar_func
-    for n in range(order):
-        sf = lie_derivative(directional_func, sf)
+    for _ in range(order):
+        sf = lie_derivative_func(sf, directional_func)
     return sf
 
+@functools.partial(jax.jit, static_argnames=("scalar_func", "directional_func", "order"))
+def lie_derivative_n(state, order, scalar_func, directional_func):
+    return lie_derivative_func_n(order, scalar_func, directional_func)(state)
 
-@functools.partial(jax.jit, static_argnames=["b", "alpha", "dynamics"])
-def get_cbf_constraint_rd1(b, alpha, dynamics, state, control, t):
-    if isinstance(dynamics, ControlAffineDynamics):
-        drift = lambda x: dynamics.drift_term(x, t)
-        control_jac = lambda x: dynamics.control_jacobian(x, t)
-    elif isinstance(dynamics, Dynamics):
-        A, B, C = linearize(dynamics.ode_dynamics, state, control, t)
-        drift = lambda x: A @ state + C
-        control_jac = lambda x: B
-    else:
-        raise ValueError("Invalid dynamics")
 
-    constant = lie_derivative(drift, b)(state) + alpha(b(state))
-    linear = lie_derivative(control_jac, b)(state)
+@functools.partial(jax.jit, static_argnames=["cbf", "alpha", "dynamics"])
+def get_cbf_constraint_rd1(state, time, cbf, alpha, dynamics):
+    constant = lie_derivative(state, cbf, dynamics.open_loop_dynamics(state, time)) + alpha(cbf(state))
+    linear = jax.vmap(lie_derivative, [None, None, 1])(state, cbf, dynamics.control_jacobian(state, time))
     return linear, constant
 
 
-@functools.partial(jax.jit, static_argnames=["b", "alpha1", "alpha2", "dynamics"])
-def get_cbf_constraint_rd2(b, alpha1, alpha2, dynamics, state, control, t):
-    if isinstance(dynamics, ControlAffineDynamics):
-        drift = lambda x: dynamics.drift_term(x, t)
-        control_jac = lambda x: dynamics.control_jacobian(x, t)
-    elif isinstance(dynamics, Dynamics):
-        A, B, C = linearize(dynamics.ode_dynamics, state, control, t)
-        drift = lambda x: A @ state + C
-        control_jac = lambda x: B
-    else:
-        raise ValueError("Invalid dynamics")
+@functools.partial(jax.jit, static_argnames=["cbf", "alpha1", "alpha2", "dynamics"])
+def get_cbf_constraint_rd2(state, time, cbf, alpha1, alpha2, dynamics):
+    Lf2b = lie_derivative_n(state, 2, cbf, dynamics.open_loop_dynamics)
+    Lfb_func = lie_derivative_func(cbf, dynamics.open_loop_dynamics)
+    LgLfb = jax.vmap(lie_derivative, [None, None, 1])(state, Lfb_func, dynamics.control_jacobian(state, time))
+    Lfa1b = lie_derivative(state, lambda s: alpha1(cbf(s)), dynamics.open_loop_dynamics(state, time))
+    a2_term = alpha2(lie_derivative(state, cbf, dynamics.open_loop_dynamics(state, time)) + alpha1(cbf(state)))
 
-    Lf2b = lie_derivative_n(2, drift, b)
-    LgLfb = lie_derivative(control_jac, lie_derivative(drift, b))
-    Lfa1b = lie_derivative(drift, lambda x: alpha1(b(x)))
-    a2_term = alpha2(lie_derivative(drift, b)(state) + alpha1(b(state)))
-
-
-    constant = Lf2b(state) + Lfa1b(state) + a2_term
-    linear = LgLfb(state)
+    constant = Lf2b + Lfa1b + a2_term
+    linear = LgLfb
     return linear, constant
+
