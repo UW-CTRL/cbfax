@@ -1,9 +1,7 @@
 import jax
 import jax.numpy as jnp
-import equinox as eqx
 import functools
 import abc
-from typing import Callable
 
 def runge_kutta_integrator(dynamics, dt=0.1):
     # zero-order hold
@@ -33,6 +31,12 @@ class Dynamics(metaclass=abc.ABCMeta):
     def discrete_step(self, state, control, time=0, dt=0.1):
         return runge_kutta_integrator(self.ode_dynamics, dt)(state, control, time)
 
+    def linearized_dynamics(self, state0, control0, time):
+        A, B, C = linearize(self.ode_dynamics, state0, control0, time)
+        open_loop_dynamics = lambda x, t: A @ x + C
+        control_jacobian = lambda x, t: B
+        return LinearizedNonlinearDynamics(open_loop_dynamics, control_jacobian)
+
     def __call__(self, state, control, time=0):
         return self.ode_dynamics(state, control, time)
 
@@ -52,10 +56,17 @@ class ControlAffineDynamics(Dynamics):
         """Implements the control Jacobian `G_u(x, t)`."""
 
 
-# class NAgentIntegrator(ControlAffineDynamics):
-#     integrator_dim: int
-#     N_dim: int
-#     n_agents: int
+class LinearizedNonlinearDynamics(ControlAffineDynamics):
+
+    def __init__(self, open_loop_dynamics, control_jacobian):
+        self.old = open_loop_dynamics
+        self.cj = control_jacobian
+
+    def open_loop_dynamics(self, state, time=0):
+        return self.old(state, time)
+
+    def control_jacobian(self, state, time=0):
+        return self.cj(state, time)
 
 
 class IntegratorND(ControlAffineDynamics):
@@ -147,8 +158,27 @@ class DynamicallyExtendedUnicycle(ControlAffineDynamics):
             ]
         )
 
+class SimpleCar(Dynamics):
+    state_dim: int = 3
+    control_dim: int = 2
+    wheelbase: int
 
-class SimpleCar(ControlAffineDynamics):
+    def __init__(self, wheelbase):
+        self.wheelbase = wheelbase
+
+    def ode_dynamics(self, state, control, time=0):
+        x, y, th = state
+        v, delta = control
+        return jnp.array(
+            [
+                v * jnp.cos(th),
+                v * jnp.sin(th),
+                v / self.wheelbase * jnp.tan(delta)
+            ]
+        )
+
+
+class DynamicallyExtendedSimpleCar(ControlAffineDynamics):
     state_dim: int = 4
     control_dim: int = 2
     wheelbase: int
