@@ -25,7 +25,12 @@ def lie_derivative(
 
 
 @eqx.filter_jit
-def lie_derivative_multiple(state, scalar_func, tangents, dim=1):
+def lie_derivative_multiple(
+    state: jnp.ndarray,
+    scalar_func: Callable[[jnp.ndarray], jnp.ndarray],
+    tangents: jnp.ndarray,
+    dim=1,
+):
     """
     Evaluates  ∇b(x)ᵀv  b: scalar_func, v=[v1, v2,.., vn]: n # oftangents
     Arguments:
@@ -103,7 +108,9 @@ def get_cbf_constraint_rd1(state, time, cbf, alpha, dynamics):
     constant = lie_derivative(
         state, cbf, dynamics.open_loop_dynamics(state, time)
     ) + alpha(cbf(state))
-    linear = lie_derivative_multiple(state, cbf, dynamics.control_jacobian(state, time), dim=1)
+    linear = lie_derivative_multiple(
+        state, cbf, dynamics.control_jacobian(state, time), dim=1
+    )
     return linear, constant
 
 
