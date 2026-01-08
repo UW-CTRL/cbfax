@@ -114,7 +114,8 @@ def get_cbf_constraint_rd1(state, time, cbf, alpha, dynamics):
     return linear, constant
 
 
-@functools.partial(jax.jit, static_argnames=["cbf", "alpha1", "alpha2", "dynamics"])
+# @functools.partial(jax.jit, static_argnames=["cbf", "alpha1", "alpha2", "dynamics"])
+@eqx.filter_jit
 def get_cbf_constraint_rd2(state, time, cbf, alpha1, alpha2, dynamics):
     """
     Computes the CBF constraint for a relative degree 2 system.
