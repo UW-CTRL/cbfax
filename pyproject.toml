@@ -1,0 +1,31 @@
+[build-system]
+requires = [
+  "setuptools>=68",
+  "wheel",
+  "setuptools_scm[toml]>=8",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cbfax"
+dynamic = ["version"]
+description = "cbf with jax"
+readme = "README.md"
+authors = [
+  { name = "Karen Leung", email = "kymleung@uw.edu" },
+]
+dependencies = [
+  "dynamaxsys @ git+https://github.com/UW-CTRL/dynamaxsys.git",
+  "equinox",
+  "jax",
+  "matplotlib",
+  "numpy",
+]
+
+[tool.setuptools]
+packages = ["cbfax"]
+
+[tool.setuptools_scm]
+write_to = "cbfax/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"

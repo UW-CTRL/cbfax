@@ -1,11 +1,95 @@
+from typing import Callable, List, Union
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-import functools
-import equinox as eqx
-from typing import Callable
+from dynamaxsys import ControlAffineDynamics
 
 
-# @functools.partial(jax.jit, static_argnames=("scalar_func"))
+class ControlCertificationFunction(eqx.Module):
+    certificate_func: Callable[[jnp.ndarray], jnp.ndarray]
+    alpha_func: Union[Callable[[float], float], List[Callable[[float], float]]]
+    dynamics: ControlAffineDynamics
+    state_dim: int
+    relative_degree: int
+
+    def __init__(
+        self,
+        certificate_func: Callable[[jnp.ndarray], jnp.ndarray],
+        alpha_func: Union[Callable[[float], float], List[Callable[[float], float]]],
+        dynamics: ControlAffineDynamics,
+        state_dim: int,
+        relative_degree: int,
+    ):
+        self.state_dim = state_dim
+        self.certificate_func = certificate_func
+        self.relative_degree = relative_degree
+        self.alpha_func = alpha_func
+        self.dynamics = dynamics
+        if relative_degree not in [1, 2]:
+            raise ValueError("Relative degree must be 1 or 2.")
+        # if relative_degree == 1 and not isinstance(alpha_func, callable):
+        #     raise ValueError("Alpha function must be a single function for relative degree 1.")
+        # if relative_degree == 2 and not isinstance(alpha_func, list) and all(isinstance(func, callable) for func in alpha_func):
+        #     raise ValueError("Alpha functions must be a list of functions for relative degree 2.")
+        
+    @eqx.filter_jit
+    def __call__(self, state: jnp.ndarray) -> jnp.ndarray:
+        return self.certificate_func(state)
+
+    @eqx.filter_jit
+    def gradient(self, state: jnp.ndarray) -> jnp.ndarray:
+        return jax.grad(self.certificate_func)(state)
+
+    def _control_constraint_rd1(
+        self,
+        state: jnp.ndarray,
+        time: float,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        return get_cbf_constraint_rd1(state, time, self.certificate_func, self.alpha_func, self.dynamics)
+
+    def _control_constraint_rd2(
+        self,
+        state: jnp.ndarray,
+        time: float,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        return get_cbf_constraint_rd2(state, time, self.certificate_func, self.alpha_func, self.dynamics)
+
+    @eqx.filter_jit
+    def control_constraint(
+        self,
+        state: jnp.ndarray,
+        time: float,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        if self.relative_degree == 1:
+            return self._control_constraint_rd1(state, time)
+        return self._control_constraint_rd2(state, time)
+
+
+class ControlBarrierFunction(ControlCertificationFunction):
+    def __init__(
+        self,
+        certificate_func: Callable[[jnp.ndarray], jnp.ndarray],
+        alpha_func: Union[Callable[[float], float], List[Callable[[float], float]]],
+        dynamics: ControlAffineDynamics,
+        state_dim: int,
+        relative_degree: int,
+    ):
+        super().__init__(certificate_func, alpha_func, dynamics, state_dim, relative_degree)
+
+
+class ControlLyapunovFunction(ControlCertificationFunction):
+    def __init__(
+        self,
+        certificate_func: Callable[[jnp.ndarray], jnp.ndarray],
+        alpha_func: Union[Callable[[float], float], List[Callable[[float], float]]],
+        dynamics: ControlAffineDynamics,
+        state_dim: int,
+        relative_degree: int,
+    ):
+        super().__init__(certificate_func, alpha_func, dynamics, state_dim, relative_degree)
+
+
 @eqx.filter_jit
 def lie_derivative(
     state: jnp.ndarray,
@@ -44,7 +128,10 @@ def lie_derivative_multiple(
     return jax.vmap(lie_derivative, [None, None, dim])(state, scalar_func, tangents)
 
 
-def lie_derivative_func(scalar_func, directional_func):
+def lie_derivative_func(
+    scalar_func: Callable[[jnp.ndarray], jnp.ndarray],
+    directional_func: Callable[[jnp.ndarray], jnp.ndarray],
+):
     """
     Computes the function f(x) = ∇b(x)ᵀv(x)  b: scalar_func, v: directional_func
     This is used in computing higher order CBFs
@@ -57,7 +144,11 @@ def lie_derivative_func(scalar_func, directional_func):
     return lambda state: jax.jvp(scalar_func, (state,), (directional_func(state),))[1]
 
 
-def lie_derivative_func_n(order, scalar_func, directional_func):
+def lie_derivative_func_n(
+    order: int,
+    scalar_func: Callable[[jnp.ndarray], jnp.ndarray],
+    directional_func: Callable[[jnp.ndarray], jnp.ndarray],
+):
     """
     Computes the Lie derivative of the scalar function along the directional function at a given state.
     Arguments:
@@ -75,11 +166,13 @@ def lie_derivative_func_n(order, scalar_func, directional_func):
     return sf
 
 
-# @functools.partial(
-#     jax.jit, static_argnames=("scalar_func", "directional_func", "order")
-# )
 @eqx.filter_jit
-def lie_derivative_n(state, order, scalar_func, directional_func):
+def lie_derivative_n(
+    state: jnp.ndarray,
+    order: int,
+    scalar_func: Callable[[jnp.ndarray], jnp.ndarray],
+    directional_func: Callable[[jnp.ndarray], jnp.ndarray],
+):
     """Computes the nth order Lie derivative of the scalar function along the directional function at a given state.
     Arguments:
         state: The point at which to evaluate the Lie derivative.
@@ -91,9 +184,14 @@ def lie_derivative_n(state, order, scalar_func, directional_func):
     return lie_derivative_func_n(order, scalar_func, directional_func)(state)
 
 
-# @functools.partial(jax.jit, static_argnames=["cbf", "alpha", "dynamics"])
 @eqx.filter_jit
-def get_cbf_constraint_rd1(state, time, cbf, alpha, dynamics):
+def get_cbf_constraint_rd1(
+    state: jnp.ndarray,
+    time: float,
+    cbf: Callable[[jnp.ndarray], jnp.ndarray],
+    alpha: Callable[[float], float],
+    dynamics: ControlAffineDynamics,
+):
     """
     Computes the CBF constraint for a relative degree 1 system.
     Arguments:
@@ -114,8 +212,14 @@ def get_cbf_constraint_rd1(state, time, cbf, alpha, dynamics):
     return linear, constant
 
 
-@functools.partial(jax.jit, static_argnames=["cbf", "alpha1", "alpha2", "dynamics"])
-def get_cbf_constraint_rd2(state, time, cbf, alpha1, alpha2, dynamics):
+@eqx.filter_jit
+def get_cbf_constraint_rd2(
+    state: jnp.ndarray,
+    time: float,
+    cbf: Callable[[jnp.ndarray], jnp.ndarray],
+    alphas: List[Callable[[float], float]],
+    dynamics: ControlAffineDynamics,
+):
     """
     Computes the CBF constraint for a relative degree 2 system.
     Arguments:
@@ -128,6 +232,7 @@ def get_cbf_constraint_rd2(state, time, cbf, alpha1, alpha2, dynamics):
     Returns:
         A tuple (linear, constant) representing the CBF constraint.
     """
+    alpha1, alpha2 = alphas
     Lf2b = lie_derivative_n(state, 2, cbf, dynamics.open_loop_dynamics)
     Lfb_func = lie_derivative_func(cbf, dynamics.open_loop_dynamics)
     LgLfb = jax.vmap(lie_derivative, [None, None, 1])(
