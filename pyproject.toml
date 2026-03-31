@@ -15,7 +15,7 @@ authors = [
   { name = "Karen Leung", email = "kymleung@uw.edu" },
 ]
 dependencies = [
-  "dynamaxsys @ git+https://github.com/UW-CTRL/dynamaxsys.git",
+  "dynamaxsys",
   "equinox",
   "jax",
   "matplotlib",
