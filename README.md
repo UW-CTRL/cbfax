@@ -84,8 +84,3 @@ Then build:
 make build
 ```
 
-
-### TODOs
-- tidy install instructions
-- tidy plotting functionality
-- remove dynamics.py
